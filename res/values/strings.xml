@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">胖乖去广告</string>
+    <string name="service_name">胖乖去广告</string>
+    <string name="service_desc">只在胖乖生活里工作：自动点开屏广告的「跳过」、关掉广告弹窗。不读取、不上传任何内容。</string>
+</resources>

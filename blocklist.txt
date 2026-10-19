@@ -1,0 +1,78 @@
+# 胖乖去广告 拦截名单（只对胖乖生效；改完 adb push 到手机，5 秒内生效）
+# 一行一个域名，写 a.com 同时拦 a.com 和 *.a.com
+# 千万别加：qiekj.com 整个（胖乖自己，userapi.qiekj.com 一拦整个 app 就不能用）、
+#           weixin.qq.com / tenpay.com / alipay.com（付款）、youzan（拦了胖乖会崩）
+
+# ── 广告联盟 / 聚合 ──
+pangolin-sdk-toutiao.com
+pangolin-sdk-toutiao1.com
+pangolin-sdk-toutiao-b.com
+pglstatp-toutiao.com
+pangolin.snssdk.com
+ad.oceanengine.com
+gdt.qq.com
+e.qq.com
+gdtimg.com
+ugdtimg.com
+pgdt.gtimg.cn
+adukwai.com
+e.kuaishou.com
+mobads.baidu.com
+mobads-logs.baidu.com
+cpro.baidustatic.com
+cpro.baidu.com
+pos.baidu.com
+sigmob.cn
+sigmob.com
+toponad.com
+toponadss.com
+anythinktech.com
+ad.xiaomi.com
+adv.sec.miui.com
+cupid.iqiyi.com
+vlion.cn
+advlion.com
+ubixai.com
+ubixioe.com
+yfanads.com
+baihemob.com
+shunchangzhixing.com
+medproad.com
+mentamob.com
+funlinkads.com
+tuia.cn
+1rtb.net
+adwangmai.com
+tianmu.mobi
+jt-sdk-ios.oss-cn-beijing.aliyuncs.com
+shujupie.com
+hm.baidu.com
+
+# ── 抖音直播（首页、付款后、洗衣中页面的直播带货流）──
+douyin.com
+douyincdn.com
+douyinpic.com
+douyinvod.com
+douyinstatic.com
+snssdk.com
+zijieapi.com
+ctobsnssdk.com
+bytescm.com
+mssdk-bu.bytedance.com
+apmplus.volces.com
+
+# ── 快手直播拉流 ──
+yximgs.com
+etoote.com
+httpdns.bcelive.com
+sdkoptedge.chinanetcenter.com
+
+# ── 有赞：不能拦！（10-19 实测：拦了 open.youzanyun.com，胖乖登录有赞失败后在错误线程调 WebView，整个 app 崩溃）
+#    付款后的「推荐好物」由挡板抹掉
+
+# ── 广告 SDK 自带的 HTTPDNS：拦掉后它们只能走系统 DNS，才拦得住 ──
+httpdns.alicdn.com
+
+# ── 广告追踪 / 字节安全 SDK ──
+66mobi.com
+mssdk.volces.com
