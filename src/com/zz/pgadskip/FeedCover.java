@@ -421,6 +421,8 @@ final class FeedCover {
         FrameLayout v = views.get(i);
         if (v == null) {
             v = new FrameLayout(s);
+            // 胖乖始终是浅色，挡板不能被系统强制反色。
+            if (android.os.Build.VERSION.SDK_INT >= 29) v.setForceDarkAllowed(false);
             v.setBackgroundColor(PAGE_BG);
             TextView t = new TextView(s);
             t.setTextColor(Color.parseColor("#9AA0A6"));

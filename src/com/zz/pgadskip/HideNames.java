@@ -5,7 +5,6 @@ import android.content.Context;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
@@ -20,18 +19,12 @@ final class HideNames {
     static File file;
     static long mtime = -1, lastCheck = 0;
 
-    static final String DEFAULT =
-            "# 首页图标区要抹掉的图标（写图标下面的字，一行一个；# 开头是注释）\n"
-            + "0元喝水\n胖乖商城\n外卖神券\n抖音神券\n";
-
     static synchronized void load(Context c) {
         File dir = c.getExternalFilesDir(null);
         if (dir == null) return;
         file = new File(dir, "hide.txt");
         try {
-            if (!file.exists()) {
-                try (FileOutputStream o = new FileOutputStream(file)) { o.write(DEFAULT.getBytes(StandardCharsets.UTF_8)); }
-            }
+            BuiltinLists.ensure(c, "hide.txt", R.raw.hide, R.string.hide_hash);
             Set<String> s = new HashSet<>();
             try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
                 String line;

@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">胖乖去广告</string>
     <string name="service_name">胖乖去广告</string>
-    <string name="service_desc">只在胖乖生活里工作：自动点开屏广告的「跳过」、关掉广告弹窗。不读取、不上传任何内容。</string>
+    <string name="service_desc">只在胖乖生活里识别页面、跳过广告并处理付款推广。不上传任何数据；界面结构记录仅调试用，默认关闭。</string>
 </resources>
