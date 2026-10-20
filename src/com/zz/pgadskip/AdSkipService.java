@@ -78,6 +78,7 @@ public class AdSkipService extends AccessibilityService {
         loadPages();
         Log.w("service connected, pages=" + pages.size());
         ensureVpn();
+        scheduleScan(500);   // 连上时胖乖可能停在一个静止的弹窗上，不会再有事件来，主动看一次
     }
 
     /** 胖乖清单里登记的全部 Activity。在手机上实时读，胖乖更新后自动跟着变。 */
@@ -326,14 +327,51 @@ public class AdSkipService extends AccessibilityService {
      */
     void guessActivityIfUnknown() {
         if (!currentActivity.isEmpty()) return;
-        AccessibilityNodeInfo r = getRootInActiveWindow();
-        if (r == null || r.getPackageName() == null || !TARGET.contentEquals(r.getPackageName())) return;
-        if (find(r, n -> "rv_navigation".equals(idOf(n))) != null) {
-            currentActivity = TARGET + ".MainActivity";
-            activitySince = SystemClock.uptimeMillis();
-            homeEnteredAt = activitySince;
-            Log.w("activity guessed " + currentActivity);
+        // 最上层可能是弹窗，所以胖乖的每个窗口都看一遍
+        String guess = null;
+        for (AccessibilityWindowInfo w : getWindows()) {
+            if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+            AccessibilityNodeInfo r = w.getRoot();
+            if (r == null || r.getPackageName() == null || !TARGET.contentEquals(r.getPackageName())) continue;
+            if (find(r, n -> "rv_navigation".equals(idOf(n))) != null) guess = TARGET + ".MainActivity";
+            else if (find(r, n -> "tvToPay".equals(idOf(n)) || "rvDiscount".equals(idOf(n))) != null) guess = TARGET + ".ui.activity.scan.OrderPayPreviewAct";
+            else if (find(r, n -> "tvSubmit".equals(idOf(n)) && n.getText() != null && "选好了".contentEquals(n.getText())) != null) guess = TARGET + ".ui.activity.scan.wash.WashSkuAct";
+            if (guess != null) break;
         }
+        if (guess == null) return;
+        currentActivity = guess;
+        activitySince = SystemClock.uptimeMillis();
+        if (isHome(guess)) homeEnteredAt = activitySince;
+        Log.w("activity guessed " + currentActivity);
+    }
+
+    /**
+     * 确认付款页里默认打开的「领取3天胖乖会员 送1元红包」开关（switchNewVip）：
+     * 那个会员 3 天后 9.7 元/月自动续费。开关状态读得到，只在开着时关，不会把关着的误打开。
+     */
+    final java.util.HashMap<String, Integer> vipSwitchTries = new java.util.HashMap<>();
+
+    boolean turnOffVipSwitch(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo sw = find(root, n -> {
+            if (!n.isVisibleToUser() || !n.isCheckable() || !n.isChecked()) return false;
+            CharSequence c = n.getClassName();
+            if (c == null || !c.toString().contains("Switch")) return false;
+            AccessibilityNodeInfo row = n.getParent();
+            AccessibilityNodeInfo label = row == null ? null : find(row, x -> x.getText() != null && x.getText().toString().contains("会员"));
+            return "switchNewVip".equals(idOf(n)) || label != null;
+        });
+        if (sw == null || !fresh(sw) || !sw.isChecked()) return false;
+        String key = activitySince + "";
+        int tries = vipSwitchTries.getOrDefault(key, 0);
+        if (tries >= 2) return false;
+        vipSwitchTries.put(key, tries + 1);
+        Rect b = new Rect();
+        sw.getBoundsInScreen(b);
+        lastAction = SystemClock.uptimeMillis();
+        Log.w("TURN OFF vip switch " + idOf(sw) + " " + b.toShortString() + " try " + (tries + 1));
+        Stats.hit(this);
+        if (!(sw.isClickable() && sw.performAction(AccessibilityNodeInfo.ACTION_CLICK))) tap(b.centerX(), b.centerY());
+        return true;
     }
 
     void scan() {
@@ -358,6 +396,17 @@ public class AdSkipService extends AccessibilityService {
             AccessibilityNodeInfo skip = find(root, n -> matchText(n, SKIP_TEXT) || (idOf(n).toLowerCase().contains("skip") && n.isVisibleToUser()));
             if (skip != null) { act("skip", skip); return; }
 
+            // 1b. 会员挽留弹窗「你有3天免费会员待领取 本单还可立减1元 [放弃优惠][立即领取]」：点「放弃优惠」。
+            //     按内容认，不看当前页面和窗口层级（全屏弹窗挡住时系统只报弹窗这一个窗口）
+            if (Prefs.skipVipUpsell(this) && find(root, n -> "tvToPay".equals(idOf(n))) == null
+                    && find(root, n -> n.isVisibleToUser() && n.getText() != null && n.getText().toString().contains("会员")) != null) {
+                AccessibilityNodeInfo giveUp = find(root, n -> {
+                    CharSequence t = n.getText();
+                    return n.isVisibleToUser() && t != null && t.toString().trim().equals("放弃优惠");
+                });
+                if (giveUp != null && fresh(giveUp)) { act("decline-vip-retain-popup", giveUp); return; }
+            }
+
             // 2. 广告 SDK 的全屏页 / 开屏页：找关闭按钮，找不到等一会儿按返回
             if (adAct || isOwnSplash(act)) {
                 AccessibilityNodeInfo close = find(root, n -> matchText(n, CLOSE_TEXT) || closeIdSmall(n, screen));
@@ -379,7 +428,10 @@ public class AdSkipService extends AccessibilityService {
 
             // 选套餐、确认付款、登录这类页面：下面两条一律不碰
             if (SAFE_PAGE.matcher(act).matches()) {
-                if (Prefs.uncheckPromos(this) && act.endsWith(".OrderPayPreviewAct")) uncheckTaskPromos(root);
+                if (act.endsWith(".OrderPayPreviewAct")) {
+                    if (Prefs.skipVipUpsell(this) && turnOffVipSwitch(root)) return;
+                    if (Prefs.uncheckPromos(this)) uncheckTaskPromos(root);
+                }
                 // 付款相关页面只做两件事，别的按钮一概不碰：
                 // a) 会员推销页（「优惠支付：领取3天胖乖会员」，之后 9.7 元/月自动续费）：点「放弃优惠 原价使用」
                 if (Prefs.skipVipUpsell(this) && VIP_UPSELL_PAGE.matcher(act).matches()) {

@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
         root.addView(pts);
 
         CheckBox vip = new CheckBox(this);
-        vip.setText("付款前跳出「领取3天胖乖会员」时，自动点「放弃优惠 原价使用」（那个会员之后 9.7 元/月自动续费）");
+        vip.setText("付款前不要胖乖会员：关掉默认打开的「领取3天胖乖会员」开关；跳出会员推销页时点「放弃优惠 原价使用」（那个会员之后 9.7 元/月自动续费）");
         vip.setChecked(Prefs.skipVipUpsell(this));
         vip.setOnCheckedChangeListener((c, on) -> Prefs.set(this, "skipVipUpsell", on));
         root.addView(vip);

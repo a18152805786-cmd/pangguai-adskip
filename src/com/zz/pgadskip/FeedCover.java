@@ -449,6 +449,7 @@ final class FeedCover {
         @Override public void run() {
             if (!ticking) return;
             updateLater(0);
+            s.scheduleScan(0);   // 静止的弹窗不发事件，跟着定时核对也扫一次规则
             h.postDelayed(this, 400);
         }
     };
