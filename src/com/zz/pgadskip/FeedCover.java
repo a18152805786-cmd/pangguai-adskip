@@ -70,6 +70,9 @@ final class FeedCover {
      * 10-20 放在主线程时，付款页上太慢，系统反复把无障碍服务断开重连。主线程只负责画挡板。
      */
     static final android.os.HandlerThread worker = new android.os.HandlerThread("pg-cover");
+    /** 规则扫描单独一个线程：扫描要遍历整页，放一起时挡板更新排在后面干等（10-20 切标签挡板晚好几秒）。 */
+    static final android.os.HandlerThread scanWorker = new android.os.HandlerThread("pg-scan");
+    static { scanWorker.start(); }
     static { worker.start(); }
     final Handler bg = new Handler(worker.getLooper());
 
@@ -90,15 +93,22 @@ final class FeedCover {
         String act = AdSkipService.currentActivity;
         if (!Prefs.enabled(s) || !Prefs.cover(s) || SystemClock.uptimeMillis() < suppressUntil || !isCoverPage(act)) return null;
         AccessibilityNodeInfo root = topRoot();
-        // 胖乖不在前台或有弹窗：全部收起；回来时窗口变化事件会再叫醒这里
-        if (root == null) return null;
+        // 胖乖不在前台或有弹窗：全部收起。弹窗关掉时不一定有事件（10-20 会员挽留框关后「顺手买一单」没再盖上），
+        // 所以还在这些页面上时，半秒后再看一次
+        if (root == null) { retryLater = true; return null; }
         return findBlocks(root, act);
     }
+
+    volatile boolean retryLater = false;
 
     /** 主线程：按算好的结果画挡板。 */
     void apply(List<Block> blocks) {
         try {
-            if (blocks == null) { hideAll(); return; }
+            if (blocks == null) {
+                hideAll();
+                if (retryLater) { retryLater = false; h.postDelayed(() -> updateLater(0), 500); }
+                return;
+            }
             startTick();
             for (int i = 0; i < blocks.size(); i++) show(i, blocks.get(i));
             for (int i = blocks.size(); i < views.size(); i++) hideAt(i);
@@ -123,19 +133,47 @@ final class FeedCover {
         return root;
     }
 
+    // ── 快速查找：让胖乖那边按 id / 文字直接搜，一次跨进程调用就返回，不再逐个遍历几千个控件 ──
+    // （10-20：首页直播网页控件很多，逐个遍历一次要好几秒，切标签时挡板跟不上，还盖住了「我的」页的订单按钮）
+    static List<AccessibilityNodeInfo> byId(AccessibilityNodeInfo root, String id) {
+        List<AccessibilityNodeInfo> out = new ArrayList<>();
+        try {
+            for (AccessibilityNodeInfo n : root.findAccessibilityNodeInfosByViewId(AdSkipService.TARGET + ":id/" + id))
+                if (n != null && n.isVisibleToUser()) out.add(n);
+        } catch (Throwable ignored) { }
+        return out;
+    }
+
+    static AccessibilityNodeInfo firstById(AccessibilityNodeInfo root, String id) {
+        List<AccessibilityNodeInfo> l = byId(root, id);
+        return l.isEmpty() ? null : l.get(0);
+    }
+
+    /** exact=true 只要文字完全相同的；false 包含即可。 */
+    static List<AccessibilityNodeInfo> byText(AccessibilityNodeInfo root, String text, boolean exact) {
+        List<AccessibilityNodeInfo> out = new ArrayList<>();
+        try {
+            for (AccessibilityNodeInfo n : root.findAccessibilityNodeInfosByText(text)) {
+                if (n == null || !n.isVisibleToUser() || n.getText() == null) continue;
+                String t = n.getText().toString().trim();
+                if (exact ? t.equals(text) : t.contains(text)) out.add(n);
+            }
+        } catch (Throwable ignored) { }
+        return out;
+    }
+
     List<Block> findBlocks(AccessibilityNodeInfo root, String act) {
         List<Block> out = new ArrayList<>();
         int bottomLimit = bottomBarTop(root);
 
         // 1. 直播带货流：id 以 ll_scrolling_view 开头（首页是 ll_scrolling_view，启动页是 ll_scrolling_view_mall）
-        List<AccessibilityNodeInfo> feeds = AdSkipService.findAll(root,
-                n -> n.isVisibleToUser() && AdSkipService.idOf(n).startsWith("ll_scrolling_view"), 3);
+        List<AccessibilityNodeInfo> feeds = byId(root, "ll_scrolling_view");
+        feeds.addAll(byId(root, "ll_scrolling_view_mall"));
         if (feeds.isEmpty()) {
             // 以后改了 id：从「进入直播间」「直播中」往上找最近一层能滚动的容器
-            AccessibilityNodeInfo mark = AdSkipService.find(root, n -> {
-                CharSequence t = n.getText();
-                return n.isVisibleToUser() && t != null && ("进入直播间".contentEquals(t) || "直播中".contentEquals(t));
-            });
+            List<AccessibilityNodeInfo> marks = byText(root, "进入直播间", true);
+            if (marks.isEmpty()) marks = byText(root, "直播中", true);
+            AccessibilityNodeInfo mark = marks.isEmpty() ? null : marks.get(0);
             AccessibilityNodeInfo p = mark == null ? null : mark.getParent();
             for (int i = 0; i < 30 && p != null; i++) {
                 if (p.isScrollable()) { feeds.add(p); break; }
@@ -152,13 +190,10 @@ final class FeedCover {
 
         if (AdSkipService.isHome(act)) {
             // 胖乖福利助手：数据跟正常功能走同一个接口，网络上拦不了，只能抹掉
-            AccessibilityNodeInfo w = AdSkipService.find(root,
-                    n -> n.isVisibleToUser() && "welfare_assistant".equals(AdSkipService.idOf(n)));
+            AccessibilityNodeInfo w = firstById(root, "welfare_assistant");
             if (w == null) {
-                AccessibilityNodeInfo t = AdSkipService.find(root, n -> {
-                    CharSequence x = n.getText();
-                    return n.isVisibleToUser() && x != null && "胖乖福利助手".contentEquals(x);
-                });
+                List<AccessibilityNodeInfo> ts = byText(root, "胖乖福利助手", true);
+                AccessibilityNodeInfo t = ts.isEmpty() ? null : ts.get(0);
                 for (int i = 0; i < 4 && t != null; i++) {
                     t = t.getParent();
                     if (t == null) break;
@@ -191,13 +226,10 @@ final class FeedCover {
             }
             int headerBottom = Math.max(topLimit, headerBottom(root));
             if (!icons.isEmpty() || !cards.isEmpty()) {
-                for (AccessibilityNodeInfo label : AdSkipService.findAll(root, n -> {
-                    CharSequence x = n.getText();
-                    if (!n.isVisibleToUser() || x == null) return false;
-                    String t = x.toString().trim();
-                    return icons.contains(t) || cards.contains(t);
-                }, 20)) {
-                    if (!AdSkipService.fresh(label)) continue;
+                List<AccessibilityNodeInfo> labels = new ArrayList<>();
+                for (String name : icons) labels.addAll(byText(root, name, true));
+                for (String name : cards) labels.addAll(byText(root, name, true));
+                for (AccessibilityNodeInfo label : labels) {
                     String t = label.getText().toString().trim();
                     Rect r = cards.contains(t) ? cardOf(label, sw, sh) : iconCell(label, sw);
                     if (r == null) continue;
@@ -215,10 +247,10 @@ final class FeedCover {
             // 选套餐、确认付款页：只抹 hide.txt 里 id: 写明的块（顺手买一单、会员横幅），不碰「去支付」那一栏
             java.util.Set<String> ids = new java.util.HashSet<>();
             for (String line : HideNames.get(s)) if (line.startsWith("id:")) ids.add(line.substring(3).trim());
-            AccessibilityNodeInfo pay = AdSkipService.find(root, n -> n.isVisibleToUser()
-                    && ("clBottom".equals(AdSkipService.idOf(n)) || "bottomView".equals(AdSkipService.idOf(n))));
+            AccessibilityNodeInfo pay = firstById(root, "clBottom");
+            if (pay == null) pay = firstById(root, "bottomView");
             int payTop = bottomLimit;
-            if (pay != null && AdSkipService.fresh(pay)) {
+            if (pay != null) {
                 Rect b = new Rect();
                 pay.getBoundsInScreen(b);
                 payTop = Math.min(payTop, b.top);
@@ -228,13 +260,14 @@ final class FeedCover {
 
         if (AFTER_PAY.matcher(act).matches()) {
             // 2. 推荐商品卡：id 认得出来就用 id，否则找「推荐好物」这类标题，取它所在的整张卡
-            List<AccessibilityNodeInfo> recs = AdSkipService.findAll(root,
-                    n -> n.isVisibleToUser() && RECOMMEND_ID.matcher(AdSkipService.idOf(n)).matches(), 3);
+            List<AccessibilityNodeInfo> recs = byId(root, "youzan_recommend");
             if (recs.isEmpty()) {
-                AccessibilityNodeInfo title = AdSkipService.find(root, n -> {
-                    CharSequence t = n.getText();
-                    return n.isVisibleToUser() && t != null && t.length() < 20 && RECOMMEND_TITLE.matcher(t).matches();
-                });
+                AccessibilityNodeInfo title = null;
+                for (String k : new String[]{"推荐好物", "边洗边逛", "边洗边买", "猜你喜欢", "为你推荐", "好物推荐"}) {
+                    for (AccessibilityNodeInfo n : byText(root, k, false))
+                        if (n.getText().length() < 20) { title = n; break; }
+                    if (title != null) break;
+                }
                 AccessibilityNodeInfo card = title == null ? null : title.getParent();
                 if (card != null) recs.add(card);
             }
@@ -254,9 +287,9 @@ final class FeedCover {
         if (ids.isEmpty()) return;
         int sh = s.getResources().getDisplayMetrics().heightPixels;
         int sw = s.getResources().getDisplayMetrics().widthPixels;
-        for (AccessibilityNodeInfo n : AdSkipService.findAll(root,
-                x -> x.isVisibleToUser() && ids.contains(AdSkipService.idOf(x)), 6)) {
-            if (!AdSkipService.fresh(n)) continue;
+        List<AccessibilityNodeInfo> hits = new ArrayList<>();
+        for (String id : ids) hits.addAll(byId(root, id));
+        for (AccessibilityNodeInfo n : hits) {
             Rect r = new Rect();
             n.getBoundsInScreen(r);
             if (r.left < -5 || r.right > sw + 5) continue;   // 页面滑入动画中，还在屏幕外
@@ -283,16 +316,13 @@ final class FeedCover {
     int headerBottom(AccessibilityNodeInfo root) {
         int sh = s.getResources().getDisplayMetrics().heightPixels;
         int bottom = 0;
-        for (AccessibilityNodeInfo n : AdSkipService.findAll(root, x -> {
-            if (!x.isVisibleToUser() || !x.isClickable()) return false;
-            Rect b = new Rect();
-            x.getBoundsInScreen(b);
-            return b.top < sh * 0.12 && b.height() < sh * 0.1 && b.height() > 0;
-        }, 10)) {
-            Rect b = new Rect();
-            n.getBoundsInScreen(b);
-            bottom = Math.max(bottom, b.bottom);
-        }
+        // 「我的」页顶上的客服、设置按钮
+        for (String id : new String[]{"ivService", "ivSet"})
+            for (AccessibilityNodeInfo n : byId(root, id)) {
+                Rect b = new Rect();
+                n.getBoundsInScreen(b);
+                if (b.top < sh * 0.12) bottom = Math.max(bottom, b.bottom);
+            }
         return bottom;
     }
 
@@ -314,14 +344,13 @@ final class FeedCover {
     Rect navTab(AccessibilityNodeInfo root, String label) {
         int sh = s.getResources().getDisplayMetrics().heightPixels;
         int sw = s.getResources().getDisplayMetrics().widthPixels;
-        AccessibilityNodeInfo t = AdSkipService.find(root, n -> {
-            CharSequence x = n.getText();
-            if (!n.isVisibleToUser() || x == null || !label.contentEquals(x)) return false;
+        AccessibilityNodeInfo t = null;
+        for (AccessibilityNodeInfo n : byText(root, label, true)) {
             Rect b = new Rect();
             n.getBoundsInScreen(b);
-            return b.top > sh * 0.85;
-        });
-        if (t == null || !AdSkipService.fresh(t)) return null;
+            if (b.top > sh * 0.85) { t = n; break; }
+        }
+        if (t == null) return null;
         Rect r = new Rect();
         AccessibilityNodeInfo cell = t;
         for (int i = 0; i < 4 && cell != null; i++) {
@@ -334,7 +363,7 @@ final class FeedCover {
             cell = cell.getParent();
         }
         // 文字和图标在格子里上下排，往上补到导航栏顶边，图标也盖住
-        AccessibilityNodeInfo bar = AdSkipService.find(root, n -> n.isVisibleToUser() && "rv_navigation".equals(AdSkipService.idOf(n)));
+        AccessibilityNodeInfo bar = firstById(root, "rv_navigation");
         if (bar != null) {
             Rect b = new Rect();
             bar.getBoundsInScreen(b);
@@ -348,8 +377,8 @@ final class FeedCover {
 
     /** 顶部标题栏底边：页面往上滚时，挡板不能压到标题栏（返回键、扫一扫）上。 */
     int toolbarBottom(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo tb = AdSkipService.find(root, n -> n.isVisibleToUser()
-                && ("toolbar".equals(AdSkipService.idOf(n)) || "titleBar".equals(AdSkipService.idOf(n))));
+        AccessibilityNodeInfo tb = firstById(root, "toolbar");
+        if (tb == null) tb = firstById(root, "titleBar");
         if (tb == null) return (int) (s.getResources().getDisplayMetrics().heightPixels * 0.08);
         Rect r = new Rect();
         tb.getBoundsInScreen(r);
@@ -358,10 +387,13 @@ final class FeedCover {
 
     /** 底部固定栏（首页的导航栏）顶边，挡板不往下盖。 */
     int bottomBarTop(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo tab = AdSkipService.find(root, n -> {
-            CharSequence t = n.getText();
-            return n.isVisibleToUser() && t != null && "首页".contentEquals(t);
-        });
+        int sh = s.getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo tab = null;
+        for (AccessibilityNodeInfo n : byText(root, "首页", true)) {
+            Rect b = new Rect();
+            n.getBoundsInScreen(b);
+            if (b.top > sh * 0.85) { tab = n; break; }
+        }
         if (tab == null) return Integer.MAX_VALUE;
         Rect tb = new Rect();
         tab.getBoundsInScreen(tb);
@@ -449,7 +481,6 @@ final class FeedCover {
         @Override public void run() {
             if (!ticking) return;
             updateLater(0);
-            s.scheduleScan(0);   // 静止的弹窗不发事件，跟着定时核对也扫一次规则
             h.postDelayed(this, 400);
         }
     };

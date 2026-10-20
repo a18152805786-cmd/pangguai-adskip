@@ -134,6 +134,12 @@ public class AdSkipService extends AccessibilityService {
             AccessibilityNodeInfo src = e.getSource();
             if (!homeTab && src != null) homeTab = find(src, n -> n.getText() != null && "首页".contentEquals(n.getText())) != null;
             if (homeTab) homeEnteredAt = SystemClock.uptimeMillis();
+            // 点了底部导航栏：页面马上要换，先把挡板全收起来，免得旧位置的挡板盖住新页面的按钮
+            if (clicked != null) {
+                Rect cb = new Rect();
+                clicked.getBoundsInScreen(cb);
+                if (cb.top > screenRect().height() * 0.85) handler.post(() -> cover.hideAll());
+            }
             // 点了底部标签等：挡板马上重新判断，0.3 秒后再核对一次（切页有动画）
             cover.updateLater(0);
             handler.postDelayed(() -> cover.updateLater(0), 300);
@@ -145,6 +151,7 @@ public class AdSkipService extends AccessibilityService {
             // 只把胖乖清单里的 Activity 当作页面切换；弹窗（如 xpopup 的 FullScreenDialog）不算
             if (isPage(cls)) {
                 if (!cls.equals(currentActivity)) {
+                    handler.post(() -> cover.hideAll());   // 换页面：先收起旧挡板
                     currentActivity = cls;
                     activitySince = SystemClock.uptimeMillis();
                     if (activitySince - lastPayTapAt < 5000 && PAY_REDIRECT_PAGE.matcher(cls).matches()) {
@@ -161,6 +168,11 @@ public class AdSkipService extends AccessibilityService {
             if (Prefs.record(this)) Log.dumpLater(this, "state:" + cls);
         }
         scheduleScan(e.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ? 50 : 250);
+        if (e.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // 弹窗刚出来时内容还没画好，之后又静止不动、不再发事件（10-20 会员挽留框就这样卡住没被关），
+            // 所以弹出后再补看三次
+            for (long d : new long[]{400, 1000, 2000}) handler.postDelayed(() -> scheduleScan(0), d);
+        }
         cover.updateLater(e.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ? 120 : 0);
     }
 
@@ -225,7 +237,7 @@ public class AdSkipService extends AccessibilityService {
         }, delay);
     }
 
-    final Handler bg = new Handler(FeedCover.worker.getLooper());
+    final Handler bg = new Handler(FeedCover.scanWorker.getLooper());
 
     // ── 确认付款页：取消勾选「会跳去别的 app」的推广（阅读微博优惠、闪购学生福利…）──
     // 这类推广默认勾着；勾着时点「去支付」不会付款，而是先拉起微博/淘宝，拒绝后还勾着，于是反复跳。
