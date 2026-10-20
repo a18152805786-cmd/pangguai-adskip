@@ -65,8 +65,9 @@ public class AdSkipService extends AccessibilityService {
     static final Pattern AD_MARK = Pattern.compile("^\\s*(广告|AD|Ad|ad|广告·|摇一摇.*|扭一扭.*|点击跳转.*|立即下载|查看详情|了解更多|打开看看)\\s*$");
 
     final Handler handler = new Handler(Looper.getMainLooper());
-    String currentActivity = "";
-    long activitySince = 0;
+    // 进程级状态：系统重连无障碍服务时会新建服务对象，放在实例里就会忘了当前在哪一页（10-20 付款页挡板因此失效）
+    static volatile String currentActivity = "";
+    static volatile long activitySince = 0;
     int backTries = 0;
     long lastAction = 0;
     boolean scanPending = false;
@@ -120,6 +121,13 @@ public class AdSkipService extends AccessibilityService {
         ensureVpn();
         if (e.getEventType() == AccessibilityEvent.TYPE_VIEW_SCROLLED) { cover.updateLater(0); return; }
         if (e.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            // 记下「去支付」被点的时间：之后几秒内如果被带去推广网页（微博校园等），自动返回
+            AccessibilityNodeInfo clicked = e.getSource();
+            boolean payTap = false;
+            for (CharSequence t : e.getText()) if (t != null && "去支付".contentEquals(t)) payTap = true;
+            if (!payTap && clicked != null) payTap = "tvToPay".equals(idOf(clicked))
+                    || find(clicked, n -> n.getText() != null && "去支付".contentEquals(n.getText())) != null;
+            if (payTap) { lastPayTapAt = SystemClock.uptimeMillis(); payTapPage = currentActivity; }
             boolean homeTab = false;
             for (CharSequence t : e.getText()) if (t != null && "首页".contentEquals(t)) homeTab = true;
             AccessibilityNodeInfo src = e.getSource();
@@ -138,6 +146,10 @@ public class AdSkipService extends AccessibilityService {
                 if (!cls.equals(currentActivity)) {
                     currentActivity = cls;
                     activitySince = SystemClock.uptimeMillis();
+                    if (activitySince - lastPayTapAt < 5000 && PAY_REDIRECT_PAGE.matcher(cls).matches()) {
+                        long since = activitySince;
+                        handler.postDelayed(() -> checkPayRedirect(cls, since), 1200);
+                    }
                     if (isHome(cls)) homeEnteredAt = activitySince;
                     backTries = 0;
                     Log.w("activity " + cls);
@@ -152,9 +164,44 @@ public class AdSkipService extends AccessibilityService {
     }
 
     long vpnCheckedAt = 0;
+    long lastPayTapAt = -100000;
+    String payTapPage = "";
+
+    /** 点「去支付」后可能被带去的胖乖内置网页（微博校园这类推广就开在这里）。 */
+    static final Pattern PAY_REDIRECT_PAGE = Pattern.compile("^com\\.qiekj\\.user\\.ui\\.activity\\.web\\.\\w+$");
+    /** 网页标题带这些字的是真付款页，绝不返回。 */
+    static final Pattern REAL_PAY_TITLE = Pattern.compile(".*(支付|收银|银联|付款|充值|订单|账单|钱包|银行|验证|密码).*");
+
+    /**
+     * 点了「去支付」却被带进推广网页（10-20 实测：默认勾着「阅读微博优惠0.5元」，去支付直接跳到「微博校园」）：
+     * 看一眼网页标题，不是付款页就按返回。返回后那条推广会消失，再点一次去支付就正常付款。
+     */
+    void checkPayRedirect(String cls, long since) {
+        if (!Prefs.skipPayRedirect(this) || !cls.equals(currentActivity) || activitySince != since) return;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null || root.getPackageName() == null || !TARGET.contentEquals(root.getPackageName())) return;
+        int sh = screenRect().height();
+        StringBuilder title = new StringBuilder();
+        for (AccessibilityNodeInfo n : findAll(root, x -> {
+            if (!x.isVisibleToUser() || x.getText() == null || x.getText().length() == 0) return false;
+            Rect b = new Rect();
+            x.getBoundsInScreen(b);
+            return b.top < sh * 0.12;
+        }, 6)) title.append(n.getText()).append(' ');
+        String t = title.toString().trim();
+        if (t.isEmpty() || REAL_PAY_TITLE.matcher(t).matches()) {
+            Log.w("pay redirect kept: " + cls + " title=" + t);
+            return;
+        }
+        Log.w("BACK from pay redirect " + cls + " title=" + t + " (tapped in " + payTapPage + ")");
+        Stats.hit(this);
+        lastPayTapAt = -100000;
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        handler.post(() -> android.widget.Toast.makeText(this, "已跳过「" + t + "」推广，请再点一次「去支付」", android.widget.Toast.LENGTH_LONG).show());
+    }
     long gridFlippedAt = 0;
     /** 最近一次回到首页的时间：进入 MainActivity、推断出首页、或点了底部「首页」。 */
-    long homeEnteredAt = 0;
+    static volatile long homeEnteredAt = 0;
 
     /** 胖乖一有动静就确认网络拦截开着；被 Clash 顶掉后、Clash 关了再打开胖乖时自动补上。 */
     void ensureVpn() {
@@ -170,10 +217,83 @@ public class AdSkipService extends AccessibilityService {
     void scheduleScan(long delay) {
         if (scanPending) return;
         scanPending = true;
-        handler.postDelayed(() -> {
+        // 跟挡板同一个后台线程：主线程不被跨进程查询卡住，两边也不会同时查
+        bg.postDelayed(() -> {
             scanPending = false;
             try { scan(); } catch (Throwable t) { Log.w("scan error " + t); }
         }, delay);
+    }
+
+    final Handler bg = new Handler(FeedCover.worker.getLooper());
+
+    // ── 确认付款页：取消勾选「会跳去别的 app」的推广（阅读微博优惠、闪购学生福利…）──
+    // 这类推广默认勾着；勾着时点「去支付」不会付款，而是先拉起微博/淘宝，拒绝后还勾着，于是反复跳。
+    // 勾选状态无障碍读不到（勾着的银联支付读出来也是未勾选），所以截屏看那个圆圈是不是蓝色。
+    long promoShotAt = 0;
+    boolean promoShotPending = false;
+    final java.util.HashMap<String, Integer> promoTries = new java.util.HashMap<>();
+
+    void uncheckTaskPromos(AccessibilityNodeInfo root) {
+        if (android.os.Build.VERSION.SDK_INT < 30 || promoShotPending) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - promoShotAt < 1500 || now - activitySince < 800) return;   // 页面刚出来时还在加载
+        AccessibilityNodeInfo list = find(root, n -> n.isVisibleToUser() && "rvDiscount".equals(idOf(n)));
+        if (list == null) return;
+        List<String> names = new ArrayList<>();
+        List<Rect> boxes = new ArrayList<>();
+        for (AccessibilityNodeInfo sel : findAll(list, n -> n.isVisibleToUser() && "viewSelector".equals(idOf(n)), 6)) {
+            if (!fresh(sel)) continue;
+            AccessibilityNodeInfo row = sel.getParent();
+            AccessibilityNodeInfo nameNode = row == null ? null : find(row, n -> "tvPromotionName".equals(idOf(n)));
+            String name = nameNode == null || nameNode.getText() == null ? "" : nameNode.getText().toString();
+            if (name.isEmpty() || name.contains("优惠券")) continue;   // 胖乖自己的优惠券是正常抵扣，不动
+            if (promoTries.getOrDefault(activitySince + name, 0) >= 2) continue;
+            Rect b = new Rect();
+            sel.getBoundsInScreen(b);
+            names.add(name);
+            boxes.add(b);
+        }
+        if (names.isEmpty()) return;
+        promoShotAt = now;
+        promoShotPending = true;
+        final long page = activitySince;
+        takeScreenshot(android.view.Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override public void onSuccess(ScreenshotResult r) {
+                promoShotPending = false;
+                try {
+                    android.graphics.Bitmap hw = android.graphics.Bitmap.wrapHardwareBuffer(r.getHardwareBuffer(), r.getColorSpace());
+                    android.graphics.Bitmap bmp = hw == null ? null : hw.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+                    r.getHardwareBuffer().close();
+                    if (bmp == null || page != activitySince) return;
+                    for (int i = 0; i < names.size(); i++) {
+                        Rect b = boxes.get(i);
+                        double blue = blueShare(bmp, b);
+                        if (blue < 0.25) continue;
+                        String key = page + names.get(i);
+                        promoTries.put(key, promoTries.getOrDefault(key, 0) + 1);
+                        Log.w("UNCHECK promo \"" + names.get(i) + "\" blue=" + String.format("%.2f", blue) + " " + b.toShortString());
+                        Stats.hit(AdSkipService.this);
+                        tap(b.centerX(), b.centerY());
+                        return;   // 一次只点一个，下一轮再看
+                    }
+                } catch (Throwable t) { Log.w("promo shot error " + t); }
+            }
+            @Override public void onFailure(int code) { promoShotPending = false; Log.w("promo shot failed " + code); }
+        });
+    }
+
+    /** 圆圈中间 60% 的区域里，勾选蓝（#3478F6 一类）占多少。 */
+    static double blueShare(android.graphics.Bitmap bmp, Rect b) {
+        int x0 = b.left + b.width() / 5, x1 = b.right - b.width() / 5, y0 = b.top + b.height() / 5, y1 = b.bottom - b.height() / 5;
+        int total = 0, blue = 0;
+        for (int x = Math.max(0, x0); x < Math.min(bmp.getWidth(), x1); x += 2)
+            for (int y = Math.max(0, y0); y < Math.min(bmp.getHeight(), y1); y += 2) {
+                int c = bmp.getPixel(x, y);
+                int rr = (c >> 16) & 0xFF, gg = (c >> 8) & 0xFF, bb = c & 0xFF;
+                total++;
+                if (bb > 200 && rr < 120 && gg > 80 && gg < 200) blue++;
+            }
+        return total == 0 ? 0 : (double) blue / total;
     }
 
     /** 支付、登录、人脸核验等第三方组件：永远不当广告。 */
@@ -258,7 +378,26 @@ public class AdSkipService extends AccessibilityService {
             }
 
             // 选套餐、确认付款、登录这类页面：下面两条一律不碰
-            if (SAFE_PAGE.matcher(act).matches()) continue;
+            if (SAFE_PAGE.matcher(act).matches()) {
+                if (Prefs.uncheckPromos(this) && act.endsWith(".OrderPayPreviewAct")) uncheckTaskPromos(root);
+                // 付款相关页面只做两件事，别的按钮一概不碰：
+                // a) 会员推销页（「优惠支付：领取3天胖乖会员」，之后 9.7 元/月自动续费）：点「放弃优惠 原价使用」
+                if (Prefs.skipVipUpsell(this) && VIP_UPSELL_PAGE.matcher(act).matches()) {
+                    AccessibilityNodeInfo decline = find(root, n -> {
+                        CharSequence t = n.getText();
+                        return n.isVisibleToUser() && t != null && t.toString().contains("放弃优惠");
+                    });
+                    if (decline != null && fresh(decline)) { act("decline-vip-upsell", decline); return; }
+                }
+                // b) 控件名本身就是「广告的关闭键」（ad_close、ivAdClose 这类）：点它。选套餐页顶部的美团广告就是这种
+                AccessibilityNodeInfo adClose = find(root, n -> {
+                    if (!n.isVisibleToUser()) return false;
+                    String id = idOf(n);
+                    return AD_ID.matcher(id).matches() && id.toLowerCase().contains("close") && closeIdSmall(n, screen);
+                });
+                if (adClose != null) { act("close-ad-on-pay-page", adClose); return; }
+                continue;
+            }
 
             // 3. 带广告标记的弹窗/浮层（付款结果页上的广告也算）：点关闭
             // 3a. 广告位（id 认得出来的）：只点它里面或紧挨着它的关闭键，不碰页面上别的按钮
@@ -368,6 +507,9 @@ public class AdSkipService extends AccessibilityService {
     }
 
     /** 跟钱和账号有关、点错会有后果的页面。付款结果/启动成功页不在里面，那里的广告可以关。 */
+    /** 付款前插进来的会员推销页。after.PgVipOrderAct 是付完款的，不在这里。 */
+    static final Pattern VIP_UPSELL_PAGE = Pattern.compile("^com\\.qiekj\\.user\\..*\\.before\\.PgVipOrder\\w*$");
+
     static final Pattern SAFE_PAGE = Pattern.compile(
             "(?i).*(\\.PayAct$|OrderPayPreview|NotPayOrder|SkuAct$|SkuNewAct$|SelCoupon|Login|AuthCode|Pwd|Password|BindPhone|BindExternal|AccountPhone|TicketBuy|VipBuy|VipOrder|PromotionPay|WeBankBuy|Refund|CustomScanCode|HomeScanCode|LockingAct).*");
 
@@ -375,7 +517,9 @@ public class AdSkipService extends AccessibilityService {
     static final Pattern AD_ID = Pattern.compile(
             "(?i)^(tt_|ksad_|gdt_|sig_|anythink|myoffer|ms_|tianmu|octopus|ubix|junion|wm_|yd_|beizi|bd_|mobads).*"
             // 胖乖自己的广告位：rl_float_ad、channel_banner_iv、iv_ad_close 这类，id 里有独立的 ad 段
-            + "|.*(^|_)(ad|ads|adv|advert)(_|$).*|.*(float_?ad|channel_banner|splash_ad|ad_?banner).*");
+            + "|.*(^|_)(ad|ads|adv|advert)(_|$).*|.*(float_?ad|channel_banner|splash_ad|ad_?banner).*"
+            // 驼峰写法：flAdTopOn、ivAdClose（Ad 后面跟大写，排除 tvAddress 这类）
+            + "|(?-i:.*[a-z]Ad[A-Z0-9].*|^ad[A-Z].*)");
 
     boolean closeIdSmall(AccessibilityNodeInfo n, Rect screen) {
         if (!n.isVisibleToUser()) return false;

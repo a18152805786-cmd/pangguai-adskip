@@ -73,6 +73,24 @@ public class MainActivity extends Activity {
         pts.setOnCheckedChangeListener((c, on) -> Prefs.set(this, "hidePoints", on));
         root.addView(pts);
 
+        CheckBox vip = new CheckBox(this);
+        vip.setText("付款前跳出「领取3天胖乖会员」时，自动点「放弃优惠 原价使用」（那个会员之后 9.7 元/月自动续费）");
+        vip.setChecked(Prefs.skipVipUpsell(this));
+        vip.setOnCheckedChangeListener((c, on) -> Prefs.set(this, "skipVipUpsell", on));
+        root.addView(vip);
+
+        CheckBox redir = new CheckBox(this);
+        redir.setText("点「去支付」后被带去推广网页（如「微博校园」）时自动返回，再点一次去支付即可");
+        redir.setChecked(Prefs.skipPayRedirect(this));
+        redir.setOnCheckedChangeListener((c, on) -> Prefs.set(this, "skipPayRedirect", on));
+        root.addView(redir);
+
+        CheckBox promo = new CheckBox(this);
+        promo.setText("确认付款页自动取消勾选「阅读微博优惠」「闪购学生福利」这类推广（勾着时去支付会先跳去微博/淘宝）");
+        promo.setChecked(Prefs.uncheckPromos(this));
+        promo.setOnCheckedChangeListener((c, on) -> Prefs.set(this, "uncheckPromos", on));
+        root.addView(promo);
+
         CheckBox rec = new CheckBox(this);
         rec.setText("记录胖乖的界面结构（只存在手机本地，用来补规则）");
         rec.setChecked(Prefs.record(this));

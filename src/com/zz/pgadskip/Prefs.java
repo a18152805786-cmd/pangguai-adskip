@@ -11,6 +11,9 @@ final class Prefs {
     static boolean vpn(Context c) { return sp(c).getBoolean("vpn", false); }
     static boolean hideMall(Context c) { return sp(c).getBoolean("hideMall", true); }
     static boolean hidePoints(Context c) { return sp(c).getBoolean("hidePoints", true); }
+    static boolean skipVipUpsell(Context c) { return sp(c).getBoolean("skipVipUpsell", true); }
+    static boolean skipPayRedirect(Context c) { return sp(c).getBoolean("skipPayRedirect", true); }
+    static boolean uncheckPromos(Context c) { return sp(c).getBoolean("uncheckPromos", true); }
     static void set(Context c, String k, boolean v) { sp(c).edit().putBoolean(k, v).apply(); }
 }
 

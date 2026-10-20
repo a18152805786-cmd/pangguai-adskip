@@ -58,32 +58,51 @@ final class FeedCover {
         this.wm = (WindowManager) s.getSystemService(Context.WINDOW_SERVICE);
     }
 
+    /** 付款前的页面：选套餐、确认付款。这里只按 hide.txt 的 id: 抹东西（顺手买一单、会员横幅），别的规则不跑。 */
+    static final Pattern PRE_PAY = Pattern.compile("^com\\.qiekj\\.user\\..*(SkuAct|SkuNewAct|OrderPayPreviewAct)$");
+
     static boolean isCoverPage(String act) {
-        return AdSkipService.isHome(act) || AFTER_PAY.matcher(act).matches();
+        return AdSkipService.isHome(act) || AFTER_PAY.matcher(act).matches() || PRE_PAY.matcher(act).matches();
     }
+
+    /**
+     * 扫描放在后台线程：每次扫描要向胖乖查几百个控件（每个都是一次跨进程调用），
+     * 10-20 放在主线程时，付款页上太慢，系统反复把无障碍服务断开重连。主线程只负责画挡板。
+     */
+    static final android.os.HandlerThread worker = new android.os.HandlerThread("pg-cover");
+    static { worker.start(); }
+    final Handler bg = new Handler(worker.getLooper());
 
     void updateLater(long delay) {
         if (pending) return;
         pending = true;
-        h.postDelayed(() -> {
+        bg.postDelayed(() -> {
             pending = false;
-            try { update(); } catch (Throwable t) { Log.w("cover error " + t); hideAll(); }
+            List<Block> blocks;
+            try { blocks = compute(); } catch (Throwable t) { Log.w("cover error " + t); blocks = null; }
+            final List<Block> result = blocks;
+            h.post(() -> apply(result));
         }, delay);
     }
 
-    void update() {
-        String act = s.currentActivity;
-        if (!Prefs.enabled(s) || !Prefs.cover(s) || SystemClock.uptimeMillis() < suppressUntil || !isCoverPage(act)) {
-            hideAll();
-            return;
-        }
+    /** 后台线程：算出要画哪些挡板；null = 全部收起并停掉定时核对。 */
+    List<Block> compute() {
+        String act = AdSkipService.currentActivity;
+        if (!Prefs.enabled(s) || !Prefs.cover(s) || SystemClock.uptimeMillis() < suppressUntil || !isCoverPage(act)) return null;
         AccessibilityNodeInfo root = topRoot();
-        // 胖乖不在前台或有弹窗：全部收起并停掉定时核对；回来时窗口变化事件会再叫醒这里
-        if (root == null) { hideAll(); return; }
-        startTick();
-        List<Block> blocks = findBlocks(root, act);
-        for (int i = 0; i < blocks.size(); i++) show(i, blocks.get(i));
-        for (int i = blocks.size(); i < views.size(); i++) hideAt(i);
+        // 胖乖不在前台或有弹窗：全部收起；回来时窗口变化事件会再叫醒这里
+        if (root == null) return null;
+        return findBlocks(root, act);
+    }
+
+    /** 主线程：按算好的结果画挡板。 */
+    void apply(List<Block> blocks) {
+        try {
+            if (blocks == null) { hideAll(); return; }
+            startTick();
+            for (int i = 0; i < blocks.size(); i++) show(i, blocks.get(i));
+            for (int i = blocks.size(); i < views.size(); i++) hideAt(i);
+        } catch (Throwable t) { Log.w("cover apply error " + t); hideAll(); }
     }
 
     /** 最上层是胖乖、焦点在胖乖、上面没有弹窗时，返回它的根节点。 */
@@ -189,15 +208,22 @@ final class FeedCover {
                     if (r.width() > 30 && r.height() > 40) out.add(new Block(r, ""));
                 }
             }
-            for (AccessibilityNodeInfo n : AdSkipService.findAll(root,
-                    x -> x.isVisibleToUser() && ids.contains(AdSkipService.idOf(x)), 6)) {
-                if (!AdSkipService.fresh(n)) continue;
-                Rect r = new Rect();
-                n.getBoundsInScreen(r);
-                if (r.top < headerBottom) r.top = headerBottom;
-                if (r.bottom > bottomLimit) r.bottom = bottomLimit;
-                if (r.height() > 40 && r.height() < sh * 0.6) out.add(new Block(r, ""));
+            coverIds(root, ids, out, headerBottom, bottomLimit);
+        }
+
+        if (PRE_PAY.matcher(act).matches()) {
+            // 选套餐、确认付款页：只抹 hide.txt 里 id: 写明的块（顺手买一单、会员横幅），不碰「去支付」那一栏
+            java.util.Set<String> ids = new java.util.HashSet<>();
+            for (String line : HideNames.get(s)) if (line.startsWith("id:")) ids.add(line.substring(3).trim());
+            AccessibilityNodeInfo pay = AdSkipService.find(root, n -> n.isVisibleToUser()
+                    && ("clBottom".equals(AdSkipService.idOf(n)) || "bottomView".equals(AdSkipService.idOf(n))));
+            int payTop = bottomLimit;
+            if (pay != null && AdSkipService.fresh(pay)) {
+                Rect b = new Rect();
+                pay.getBoundsInScreen(b);
+                payTop = Math.min(payTop, b.top);
             }
+            coverIds(root, ids, out, topLimit, payTop);
         }
 
         if (AFTER_PAY.matcher(act).matches()) {
@@ -221,6 +247,23 @@ final class FeedCover {
             }
         }
         return out;
+    }
+
+    /** 按控件 id 抹掉：上下不超过 top/bottom，太高（超过屏幕 60%）的不算，那是整页。 */
+    void coverIds(AccessibilityNodeInfo root, java.util.Set<String> ids, List<Block> out, int top, int bottom) {
+        if (ids.isEmpty()) return;
+        int sh = s.getResources().getDisplayMetrics().heightPixels;
+        int sw = s.getResources().getDisplayMetrics().widthPixels;
+        for (AccessibilityNodeInfo n : AdSkipService.findAll(root,
+                x -> x.isVisibleToUser() && ids.contains(AdSkipService.idOf(x)), 6)) {
+            if (!AdSkipService.fresh(n)) continue;
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (r.left < -5 || r.right > sw + 5) continue;   // 页面滑入动画中，还在屏幕外
+            if (r.top < top) r.top = top;
+            if (r.bottom > bottom) r.bottom = bottom;
+            if (r.height() > 40 && r.height() < sh * 0.6) out.add(new Block(r, ""));
+        }
     }
 
     /** 标题所在的整张卡片：往上找第一个宽度超过屏幕 85% 的父控件；比屏幕 60% 还高就不算（那是整页）。 */
@@ -360,7 +403,7 @@ final class FeedCover {
             v.setOnClickListener(x -> {
                 suppressUntil = SystemClock.uptimeMillis() + 10000;
                 hideAll();
-                h.postDelayed(this::update, 10100);
+                h.postDelayed(() -> updateLater(0), 10100);
             });
         }
         ((TextView) v.getChildAt(0)).setText(b.quiet() ? "" : b.r.height() >= 200 ? b.label + "\n点一下临时显示 10 秒" : b.label);
@@ -380,7 +423,7 @@ final class FeedCover {
             wm.addView(v, lp);
             shownRects.set(i, new Rect(b.r));
             Log.w("cover show #" + i + " " + (b.quiet() ? "(quiet)" : b.label) + (b.passThrough ? " pass-through " : " ")
-                    + b.r.toShortString() + " in " + s.currentActivity);
+                    + b.r.toShortString() + " in " + AdSkipService.currentActivity);
         } else if (!last.equals(b.r) || wasThrough != b.passThrough) {
             wm.updateViewLayout(v, lp);
             last.set(b.r);
@@ -406,11 +449,11 @@ final class FeedCover {
         @Override public void run() {
             if (!ticking) return;
             updateLater(0);
-            h.postDelayed(this, 250);
+            h.postDelayed(this, 400);
         }
     };
 
-    void startTick() { if (!ticking) { ticking = true; h.postDelayed(tick, 250); } }
+    void startTick() { if (!ticking) { ticking = true; h.postDelayed(tick, 400); } }
     void stopTick() { ticking = false; h.removeCallbacks(tick); }
 
     void hide() { hideAll(); }

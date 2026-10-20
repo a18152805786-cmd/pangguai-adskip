@@ -76,3 +76,21 @@ httpdns.alicdn.com
 # ── 广告追踪 / 字节安全 SDK ──
 66mobi.com
 mssdk.volces.com
+
+# ── 10-20 补：付款流程里冒出来的广告联盟（选套餐页的美团广告等）──
+impdsp.meituan.com
+s3plus.meituan.net
+adkwai.com
+e.kuaishou.cn
+kwaizt.com
+g-api.kwai.com
+adsmart.cc
+zhangyuyidong.cn
+rtbstar.cn
+hangzhoumengfa.com
+metricslinks.com
+fancyapi.com
+ewan.cn
+adintl.cn
+easytomessage.com
+tdid.m.qq.com
