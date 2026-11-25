@@ -94,3 +94,14 @@ ewan.cn
 adintl.cn
 easytomessage.com
 tdid.m.qq.com
+
+# ── 11-25 补：胖乖 1.147 后日志里出现、此前放行的广告联盟/广告统计 ──
+aqyad.com
+ydmob.com
+etoolads.cn
+kuaishouzt.com
+yingt.asia
+puata.info
+pms-zeus-xcdn.bdstatic.com
+bes-mtj.baidu.com
+hmma.baidu.com

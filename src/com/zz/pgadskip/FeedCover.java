@@ -46,12 +46,17 @@ final class FeedCover {
         boolean passThrough = false;
         Block(Rect r, String label) { this.r = r; this.label = label; }
         Block through() { passThrough = true; return this; }
+        /** true：画成胖乖的蓝色按钮、白字（盖在「领取并支付」上写「去支付」），配合 through() 让点击落到原按钮。 */
+        boolean button = false;
+        Block asButton() { button = true; return this; }
         /** 不写字、跟页面同色：看起来就像那块被删掉了。 */
         boolean quiet() { return label.isEmpty(); }
     }
 
     /** 胖乖页面底色是 #F5F5F6，但系统会把悬浮层压暗约 4%（设 F5F5F7 实际显示 ECECEF），所以这里设得更亮来抵消。10-19 截图取色。 */
     static final int PAGE_BG = Color.parseColor("#FEFEFF");
+    /** 胖乖付款按钮的蓝色（截图取色 #1C76F6–#207AFA）。 */
+    static final int PAY_BLUE = Color.parseColor("#1D77F7");
 
     FeedCover(AdSkipService s) {
         this.s = s;
@@ -240,7 +245,15 @@ final class FeedCover {
                     if (r.width() > 30 && r.height() > 40) out.add(new Block(r, ""));
                 }
             }
-            coverIds(root, ids, out, headerBottom, bottomLimit);
+            // 1.147 起顶部横幅和图标区重叠（横幅 0–346，图标从 277 起）：横幅挡板只盖到图标区上沿
+            int keepTop = Integer.MAX_VALUE;
+            AccessibilityNodeInfo grid = firstById(root, "vp_main");
+            if (grid != null && grid.isVisibleToUser()) {
+                Rect g = new Rect();
+                grid.getBoundsInScreen(g);
+                if (g.top > headerBottom) keepTop = g.top;
+            }
+            coverIds(root, ids, out, headerBottom, bottomLimit, keepTop);
         }
 
         if (PRE_PAY.matcher(act).matches()) {
@@ -255,7 +268,23 @@ final class FeedCover {
                 pay.getBoundsInScreen(b);
                 payTop = Math.min(payTop, b.top);
             }
-            coverIds(root, ids, out, topLimit, payTop);
+            coverIds(root, ids, out, topLimit, payTop, Integer.MAX_VALUE);
+
+            // 1.147 起确认付款页的付款按钮写成「领取并支付 / 领会员优惠1元」（原来的会员开关没了）。
+            // 点它会先进会员推销页，主服务自动点「放弃优惠 原价使用」，最后按原价付款，不开会员。
+            // 这里只把按钮上的字换成「去支付」，挡板点得透，点击照样落到原按钮上。
+            if (act.endsWith(".OrderPayPreviewAct") && Prefs.skipVipUpsell(s)) {
+                AccessibilityNodeInfo btn = firstById(root, "tvToPay");
+                if (btn != null && btn.isVisibleToUser() && btn.getText() != null) {
+                    String t = btn.getText().toString();
+                    if (t.contains("领取") || t.contains("会员")) {
+                        Rect r = new Rect();
+                        btn.getBoundsInScreen(r);
+                        if (r.width() > 100 && r.height() > 60 && r.left >= 0 && r.right <= s.getResources().getDisplayMetrics().widthPixels + 5 && r.bottom <= bottomLimit)
+                            out.add(new Block(r, "去支付").through().asButton());
+                    }
+                }
+            }
         }
 
         if (AFTER_PAY.matcher(act).matches()) {
@@ -283,7 +312,7 @@ final class FeedCover {
     }
 
     /** 按控件 id 抹掉：上下不超过 top/bottom，太高（超过屏幕 60%）的不算，那是整页。 */
-    void coverIds(AccessibilityNodeInfo root, java.util.Set<String> ids, List<Block> out, int top, int bottom) {
+    void coverIds(AccessibilityNodeInfo root, java.util.Set<String> ids, List<Block> out, int top, int bottom, int keepTop) {
         if (ids.isEmpty()) return;
         int sh = s.getResources().getDisplayMetrics().heightPixels;
         int sw = s.getResources().getDisplayMetrics().widthPixels;
@@ -295,6 +324,7 @@ final class FeedCover {
             if (r.left < -5 || r.right > sw + 5) continue;   // 页面滑入动画中，还在屏幕外
             if (r.top < top) r.top = top;
             if (r.bottom > bottom) r.bottom = bottom;
+            if (r.top < keepTop && r.bottom > keepTop) r.bottom = keepTop;   // 不压到下面要保留的图标区
             if (r.height() > 40 && r.height() < sh * 0.6) out.add(new Block(r, ""));
         }
     }
@@ -440,7 +470,24 @@ final class FeedCover {
                 h.postDelayed(() -> updateLater(0), 10100);
             });
         }
-        ((TextView) v.getChildAt(0)).setText(b.quiet() ? "" : b.r.height() >= 200 ? b.label + "\n点一下临时显示 10 秒" : b.label);
+        TextView tv = (TextView) v.getChildAt(0);
+        // 挡板视图会被不同的块复用，样式每次都要重设
+        if (b.button) {
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(PAY_BLUE);
+            bg.setCornerRadius(b.r.height() * 0.22f);
+            v.setBackground(bg);
+            tv.setTextColor(Color.WHITE);
+            tv.setTextSize(19);
+            tv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            tv.setText(b.label);
+        } else {
+            v.setBackgroundColor(PAGE_BG);
+            tv.setTextColor(Color.parseColor("#9AA0A6"));
+            tv.setTextSize(14);
+            tv.setTypeface(android.graphics.Typeface.DEFAULT);
+            tv.setText(b.quiet() ? "" : b.r.height() >= 200 ? b.label + "\n点一下临时显示 10 秒" : b.label);
+        }
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                 b.r.width(), b.r.height(), WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN

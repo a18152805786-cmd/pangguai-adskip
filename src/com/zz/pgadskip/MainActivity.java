@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        if (getActionBar() != null) getActionBar().hide();
         Log.init(this);
         Blocklist.load(this);
         HideNames.load(this);
@@ -53,6 +54,11 @@ public class MainActivity extends Activity {
         title.setTextSize(24);
         root.addView(title);
 
+        Button laundry = new Button(this);
+        laundry.setText("洗衣机空闲监测");
+        laundry.setOnClickListener(v -> startActivity(new Intent(this, LaundryActivity.class)));
+        root.addView(laundry);
+
         guideTitle = new Button(this);
         guideTitle.setOnClickListener(v -> {
             if (guideComplete) { guideExpanded = !guideExpanded; refreshStatus(); }
@@ -68,7 +74,7 @@ public class MainActivity extends Activity {
 
         TextView note = new TextView(this);
         note.setPadding(0, pad, 0, pad);
-        note.setText("这是个人自用工具，与胖乖官方无关。只在胖乖生活里工作，不联网上传任何数据；VPN 只在本机处理胖乖的 DNS 查询，未拦截的查询照常转发给 DNS 服务器。\n\n"
+        note.setText("这是个人自用工具，与胖乖官方无关。去广告在本机处理；VPN 只处理胖乖的 DNS 查询，未拦截的查询照常转发给 DNS 服务器。洗衣机监测由你登录后直接向胖乖服务器查询，不向其他服务上传账号、页面或日志。\n\n"
                 + "付款页面会自动关闭「领取3天胖乖会员」开关并点「放弃优惠」，取消勾选会跳转到微博/淘宝的推广；点「去支付」后被带进推广网页时自动返回。以上操作都可在下面的开关里关闭。\n\n"
                 + "还会跳过开屏广告、关闭广告弹窗并遮挡推广区域；自己点进去领积分的激励视频不处理。");
         root.addView(note);

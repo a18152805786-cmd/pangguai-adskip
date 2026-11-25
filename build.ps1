@@ -1,7 +1,9 @@
 ﻿# 不用 Gradle 的最小构建：aapt2 -> javac -> d8 -> zipalign -> apksigner
 # 工具在 E:\DevTools（JDK 17、build-tools 35.0.1、android-35 平台）
 param(
-    [string]$SigningConfig = $(if ($env:PGADSKIP_SIGNING_CONFIG) { $env:PGADSKIP_SIGNING_CONFIG } else { 'E:\DevTools\pgadskip-signing.properties' })
+    [string]$SigningConfig = $(if ($env:PGADSKIP_SIGNING_CONFIG) { $env:PGADSKIP_SIGNING_CONFIG } else { 'E:\DevTools\pgadskip-signing.properties' }),
+    # 洗衣机监测用的胖乖接口签名参数（base64 一行）。不进仓库；缺了照样构建，只是监测功能会提示不可用。
+    [string]$AppSecretFile = $(if ($env:PGADSKIP_APPSECRET_FILE) { $env:PGADSKIP_APPSECRET_FILE } else { 'E:\DevTools\pgadskip-qiekj-appsecret.txt' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +63,17 @@ foreach ($name in @('blocklist', 'hide')) {
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText("$stage\res\values\builtin_lists.xml", "<resources>`n$($hashes -join "`n")`n</resources>`n", $utf8)
+# 接口参数只写进暂存目录的资源，不落在仓库里
+$AppSecretFile = Assert-OutsideRepo $AppSecretFile
+$secret = ''
+if (Test-Path -LiteralPath $AppSecretFile -PathType Leaf) {
+    $secret = ([IO.File]::ReadAllText($AppSecretFile)).Trim()
+    if ($secret -notmatch '^[A-Za-z0-9+/=]+$') { throw "接口参数文件格式不对（应为一行 base64）：$AppSecretFile" }
+} else {
+    Write-Warning "没有找到接口参数文件 $AppSecretFile：照常构建，但洗衣机监测会提示不可用。"
+}
+[IO.File]::WriteAllText("$stage\res\values\qiekj_secret.xml", "<resources>`n    <string name=`"qiekj_app_secret_b64`" translatable=`"false`">$secret</string>`n</resources>`n", $utf8)
+$secret = $null
 $src = $stage
 $out = "$stage\out"
 New-Item -ItemType Directory -Force "$out\res", "$out\gen", "$out\classes", "$out\dex" | Out-Null

@@ -2,6 +2,7 @@ package com.zz.pgadskip;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -72,8 +73,25 @@ public class AdSkipService extends AccessibilityService {
     long lastAction = 0;
     boolean scanPending = false;
 
+    /** 无障碍服务此刻是否连着（进程被杀后自然回到 false）。A11yRevive 据此判断要不要重新挂上。 */
+    static volatile boolean alive = false;
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        alive = false;
+        Log.w("service unbound");
+        return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        alive = false;
+        super.onDestroy();
+    }
+
     @Override
     protected void onServiceConnected() {
+        alive = true;
         Log.init(this);
         loadPages();
         Log.w("service connected, pages=" + pages.size());
@@ -541,6 +559,19 @@ public class AdSkipService extends AccessibilityService {
                 AccessibilityNodeInfo close = find(root, n -> !isBackLike(n)
                         && ((dialog && matchText(n, CLOSE_TEXT)) || (closeIdSmall(n, screen) && idOf(n).toLowerCase().contains("close"))));
                 if (close != null) { act(dialog ? "close-home-dialog" : "close-home-layer", close); return; }
+                // 4b. 1.147 起首页弹窗（「价值2元积分」「会员尝鲜站」，BaseDialog）的 × 叫 iv_cancel，是张没字的小图。
+                //     只在不占满全屏的弹窗窗口里认它：直播间那个 cancel 是整页上的「返回」，不会落进这里
+                if (isPopupWindow(w, wins) && !fullScreen) {
+                    AccessibilityNodeInfo x = find(root, n -> {
+                        if (!n.isVisibleToUser() || isBackLike(n) || n.getText() != null) return false;
+                        String id = idOf(n).toLowerCase();
+                        if (!(id.contains("cancel") || id.contains("close"))) return false;
+                        Rect b = new Rect();
+                        n.getBoundsInScreen(b);
+                        return b.width() > 0 && b.width() < screen.width() / 6 && b.height() < screen.height() / 12;
+                    });
+                    if (x != null) { act("close-home-popup-x", x); return; }
+                }
             }
         }
     }

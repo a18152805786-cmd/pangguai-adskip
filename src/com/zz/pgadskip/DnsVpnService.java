@@ -63,6 +63,7 @@ public class DnsVpnService extends VpnService {
         Log.init(this);
         if (intent != null && ACTION_STOP.equals(intent.getAction())) { shutdown("stop requested"); stopSelf(); return START_NOT_STICKY; }
         if (!running) startTun();
+        A11yRevive.ensure(this);
         return START_STICKY;
     }
 
@@ -117,6 +118,7 @@ public class DnsVpnService extends VpnService {
         String name = Dns.qname(q);
         if (name == null) return;
 
+        A11yRevive.ensure(this);   // 胖乖在联网＝用户在用它：顺手确认无障碍服务连着
         Blocklist.reloadIfChanged(this);
         boolean block = Blocklist.blocked(name);
         logOnce(name, block);

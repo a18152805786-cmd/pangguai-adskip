@@ -9,7 +9,13 @@ import android.net.VpnService;
 public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context c, Intent i) {
+        if (i == null || !Intent.ACTION_BOOT_COMPLETED.equals(i.getAction())) return;
         Log.init(c);
+        // Android 15 起不能从开机广播启动 dataSync 前台服务，监测由使用者重新开启。
+        if (LaundryStore.enabled(c)) {
+            LaundryStore.sp(c).edit().putBoolean("watch", false).putString("error", "手机已重启，请重新开始监测").apply();
+        }
         if (Prefs.vpn(c) && VpnService.prepare(c) == null && !DnsVpnService.otherVpnActive(c)) DnsVpnService.start(c);
+        A11yRevive.ensure(c);
     }
 }
